@@ -53,3 +53,20 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 pnpm-lock.yaml
+
+# === Git internals ===
+.git/
+.github/
+
+# === Git binary objects ===
+*.pack
+*.idx
+
+# === Binary files ===
+*.exe
+*.dll
+*.pdb
+*.bin
+
+# === Tests (excluded folder) ===
+backend.Tests/
