@@ -6,9 +6,10 @@ import subprocess
 
 from langchain_ollama import ChatOllama, OllamaEmbeddings
 from langchain_community.vectorstores import Chroma
-from langchain_community.document_loaders import DirectoryLoader, TextLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.chains import RetrievalQA
+from langchain_community.document_loaders.generic import GenericLoader
+from langchain_community.document_loaders.parsers import LanguageParser
 
 
 def clone_git_repo(git_url: str, clone_dir: str) -> Path:
@@ -18,26 +19,39 @@ def clone_git_repo(git_url: str, clone_dir: str) -> Path:
     return repo_path
 
 
-def build_vectorstore(code_path: Path, persist_dir: str = "./chroma_db"):
-    print(f"\n📂 Loading and indexing files from: {code_path}")
-
-    loader = DirectoryLoader(
+def safe_load_documents(code_path: Path):
+    loader = GenericLoader.from_filesystem(
         path=str(code_path),
         glob="**/*.*",
-        loader_cls=TextLoader,
-        loader_kwargs={"encoding": "utf-8"},
-        recursive=True,
+        parser=LanguageParser(),
         show_progress=True,
     )
-    docs = loader.load()
+
+    all_docs = []
+    for blob in loader.blob_loader.yield_blobs():
+        try:
+            all_docs.extend(loader.blob_parser.lazy_parse(blob))
+        except UnicodeDecodeError as e:
+            print(f"⚠️ Skipping binary or unreadable file: {blob.path} ({e})")
+        except Exception as e:
+            print(f"⚠️ Skipping file due to unexpected error: {blob.path} ({e})")
+    return all_docs
+
+
+def build_vectorstore(code_path: Path, persist_dir: str = "./chroma_db"):
+    print(f"\n📂 Loading and indexing files from: {code_path}")
+    docs = safe_load_documents(code_path)
+    print(f"📁 Total files loaded: {len(docs)}")
 
     splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
     chunks = splitter.split_documents(docs)
-    chunks = [chunk for chunk in chunks if chunk.page_content.strip()]  # Remove empties
+    chunks = [chunk for chunk in chunks if chunk.page_content.strip()]
 
     print(f"📄 Total chunks to embed: {len(chunks)}")
-    embeddings = OllamaEmbeddings(model="nomic-embed-text")
+    if not chunks:
+        raise ValueError("❌ No text chunks to embed. Check file types or project content.")
 
+    embeddings = OllamaEmbeddings(model="nomic-embed-text")
     vectordb = Chroma.from_documents(
         documents=chunks,
         embedding=embeddings,
@@ -59,7 +73,7 @@ def start_chat(vectordb):
         if query.lower() in ["exit", "quit"]:
             break
         try:
-            answer = qa_chain.run(query)
+            answer = qa_chain.invoke({"query": query})
             print(f"🤖 LLM: {answer}\n")
         except Exception as e:
             print(f"⚠️ Error: {e}\n")
@@ -75,8 +89,8 @@ if __name__ == "__main__":
     db_path = "./chroma_db"
     temp_dir = None
 
-    # Decide source
     if args.git:
+        args.reindex = True
         temp_dir = tempfile.mkdtemp(prefix="temp_cloned_")
         code_path = clone_git_repo(args.git, temp_dir)
     elif args.codebase:
@@ -88,16 +102,17 @@ if __name__ == "__main__":
         print("❗ Please provide either --codebase or --git")
         exit(1)
 
-    # Clean or load vector DB
     if args.reindex or not Path(db_path).exists():
         vectordb = build_vectorstore(code_path, db_path)
     else:
-        vectordb = Chroma(persist_directory=db_path, embedding_function=OllamaEmbeddings(model="nomic-embed-text"))
+        vectordb = Chroma(
+            persist_directory=db_path,
+            embedding_function=OllamaEmbeddings(model="nomic-embed-text")
+        )
 
     try:
         start_chat(vectordb)
     finally:
-        # Auto-cleanup if cloned
         if temp_dir:
             shutil.rmtree(temp_dir, ignore_errors=True)
             print("🧹 Cleaned up temporary cloned repo.")

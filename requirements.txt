@@ -3,3 +3,5 @@ langchain-community
 langchain-ollama
 chromadb
 tqdm
+tree-sitter
+tree-sitter-languages
